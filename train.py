@@ -4,7 +4,8 @@ import os
 import torch as torch
 from load_data import load_relation_data, load_EOD_data
 from evaluator import evaluate
-from model import get_loss, RelationLSTM
+from model import get_loss, RelationLSTM, cal_sample_loss
+from analysis import draw_one_day_loss
 
 
 np.random.seed(123456789)
@@ -94,6 +95,7 @@ def get_batch(offset=None):
 
 # train loop
 for epoch in range(epochs):
+    print(f"\n\nepoch:{epoch}")
     np.random.shuffle(batch_offsets)
     tra_loss = 0.0
     tra_reg_loss = 0.0
@@ -116,22 +118,30 @@ for epoch in range(epochs):
         tra_reg_loss += cur_reg_loss.item()
         tra_rank_loss += cur_rank_loss.item()
 
+        # # 每个batch的数据
+        # sample_loss, sample_reg_loss, sample_rank_loss = cal_sample_loss(prediction, gt_batch, price_batch, mask_batch,
+        #                                                     batch_size, parameters['alpha'])
+        # draw_one_day_loss(sample_loss,f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/figs/{j}-sample_loss.jpg")
+        # draw_one_day_loss(sample_loss,f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/figs/{j}-reg_loss.jpg")
+        # draw_one_day_loss(sample_loss,f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/figs/{j}-rank_loss.jpg")
+        # if j>5:
+        #     break
     # train loss
     # loss = reg_loss(mse) + alpha*rank_loss
     tra_loss = tra_loss / (valid_index - parameters['seq'] - steps + 1)
     tra_reg_loss = tra_reg_loss / (valid_index - parameters['seq'] - steps + 1)
     tra_rank_loss = tra_rank_loss / (valid_index - parameters['seq'] - steps + 1)
-    print('\n\nTrain : loss:{} reg_loss:{} rank_loss:{}'.format(tra_loss, tra_reg_loss, tra_rank_loss))
+    print('Train : loss:{%.6f} reg_loss:{%.6f} rank_loss:{%.6f}'.format(tra_loss, tra_reg_loss, tra_rank_loss))
 
     # show performance on valid set
     val_loss, val_reg_loss, val_rank_loss, val_perf = validate(valid_index, test_index)
-    print('Valid : loss:{} reg_loss:{} rank_loss:{}'.format(val_loss, val_reg_loss, val_rank_loss))
+    print('Valid : loss:{%.6f} reg_loss:{%.6f} rank_loss:{%.6f}'.format(val_loss, val_reg_loss, val_rank_loss))
     print('\t Valid performance:', val_perf)
 
     # show performance on valid set
     test_loss, test_reg_loss, test_rank_loss, test_perf = validate(test_index, trade_dates)
-    print('Test: loss:{} reg_loss:{} rank_loss:{}'.format(test_loss, test_reg_loss, test_rank_loss))
-    print('\t Test performance:', test_perf)
+    print('Test: loss:{%.6f} reg_loss:{%.6f} rank_loss:{%.6f}'.format(test_loss, test_reg_loss, test_rank_loss))
+    print('\t Test performance:%.6f'%( test_perf))
 
     # best result
     if val_loss < best_valid_loss:
@@ -140,6 +150,7 @@ for epoch in range(epochs):
         # without copy.copy()
         best_valid_perf = val_perf
         best_test_perf = test_perf
-        print('Better valid loss:', best_valid_loss)
-print('\nBest Valid performance:', best_valid_perf)
-print('Best Test performance:', best_test_perf)
+        print('Better valid loss:%.6f'%( best_valid_loss))
+        torch.save(model.state_dict(), f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/figs/{epoch}.pt")
+print('\nBest Valid performance:%.6f'%( best_valid_perf))
+print('Best Test performance:%.6f'%(best_test_perf))

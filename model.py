@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 
 
 def get_loss(prediction, ground_truth, base_price, mask, batch_size, alpha):
@@ -24,6 +25,34 @@ def get_loss(prediction, ground_truth, base_price, mask, batch_size, alpha):
     )
     loss = reg_loss + alpha * rank_loss
     return loss, reg_loss, rank_loss, return_ratio
+
+def cal_sample_loss(prediction, ground_truth, base_price, mask, batch_size, alpha):
+    # 拿到每个sample的loss
+    device = prediction.device
+    all_one = torch.ones(batch_size, 1, dtype=torch.float32).to(device)
+    return_ratio = torch.div(torch.sub(prediction, base_price), base_price)
+    # return ratio's mse loss
+    return_ratio_np = (return_ratio*mask).detach().cpu().numpy()
+    sample_reg_loss = np.square((ground_truth*mask).numpy()-return_ratio_np)
+    # formula (4-6)
+    pre_pw_dif = torch.sub(
+        return_ratio @ all_one.t(),
+        all_one @ return_ratio.t()
+    )
+    gt_pw_dif = torch.sub(
+        all_one @ ground_truth.t(),
+        ground_truth @ all_one.t()
+    )
+    mask_pw = mask @ mask.t()
+    sample_rank_loss = torch.mean(F.relu(pre_pw_dif * gt_pw_dif * mask_pw),dim=0)
+    
+    print(f"sample_rank_loss:{sample_rank_loss.shape}")
+    sample_loss = sample_reg_loss + alpha * sample_rank_loss
+    return sample_loss, sample_reg_loss, sample_rank_loss
+
+
+
+
 
 
 class GraphModule(nn.Module):
