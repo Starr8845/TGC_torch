@@ -13,7 +13,7 @@ def get_loss(prediction, ground_truth, base_price, mask, batch_size, alpha, l4=F
         reg_loss = F.mse_loss(return_ratio * mask, ground_truth * mask)
     else:
         reg_losses = (return_ratio * mask - ground_truth * mask) **2
-        reg_loss = (reg_losses.mean() + (reg_losses*weight_mask*3).mean())/4
+        reg_loss = (reg_losses.mean() + (reg_losses*weight_mask)/(weight_mask.sum()))
     # formula (4-6)
     pre_pw_dif = torch.sub(
         return_ratio @ all_one.t(),
@@ -121,7 +121,7 @@ class RelationLSTM(nn.Module):
         self.fc = nn.Linear(64 * 2 + 5, 1)
         self.fc_residual = nn.Linear(5, 5)
 
-    def forward(self, inputs):
+    def get_repre(self, inputs):
         # inputs: [1026, 16, 5]
         x, _ = self.lstm(inputs)
         x = x[:, -1, :]   # [1026,64]
@@ -129,5 +129,45 @@ class RelationLSTM(nn.Module):
         # outputs_cat = torch.cat([x, outputs_graph], dim=1)
         residual = self.fc_residual(inputs[:,-1,:].squeeze())
         outputs_cat = torch.cat([residual, x, outputs_graph], dim=1)
+        return outputs_cat
+    
+    def predict(self, outputs_cat):
         prediction = F.leaky_relu(self.fc(outputs_cat))
         return prediction
+
+    def forward(self, inputs):
+        outputs_cat = self.get_repre(inputs)
+        prediction = self.predict(outputs_cat)
+        return prediction
+    
+def contrastive_three_modes_loss(features, scores, weight_mask=None, temp=0.1, base_temperature=0.07):
+    device = (torch.device('cuda') if features.is_cuda
+              else torch.device('cpu'))
+    batch_size = features.shape[0]
+    scores = scores.contiguous().view(-1, 1)
+    weight_mask = weight_mask.contiguous().view(-1,1)
+    # 这里这两个阈值 还需要待定
+    hard_mask = weight_mask.mul(weight_mask.T)
+    mask_positives = ((torch.abs(scores.sub(scores.T)) < 3e-4)*hard_mask).float().to(device)    # 这里考虑再乘一下 hard samples的mask   # 要拉近的是hard samples的距离
+    mask_negatives = (torch.abs(scores.sub(scores.T)) > 1e-3).float().to(device)
+    mask_neutral = mask_positives + mask_negatives
+
+    anchor_dot_contrast = torch.div(torch.matmul(features, features.T), temp)
+    
+    logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
+    logits = anchor_dot_contrast - logits_max.detach()
+
+    logits_mask = torch.scatter(
+        torch.ones_like(mask_positives), 1,
+        torch.arange(batch_size).view(-1, 1).to(device), 0) * mask_neutral
+    mask_positives = mask_positives * logits_mask
+    exp_logits = torch.exp(logits) * logits_mask
+    
+    log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True) + 1e-20)
+    mean_log_prob_pos = (mask_positives * log_prob).sum(1) / (mask_positives.sum(1) + 1e-20)
+
+    loss = - (temp / base_temperature) * mean_log_prob_pos
+    loss = loss.view(1, batch_size).mean()
+    return loss, mask_positives.sum(1).mean(), mask_negatives.sum(1).mean()
+
+

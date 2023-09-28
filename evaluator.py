@@ -82,7 +82,10 @@ def evaluate(prediction, ground_truth, mask, report=False):
     # prediction best return ratio
     performance['btl'] = bt_long
     # prediction top 5 average ratio
-    # performance['btl5'] = bt_long5
+    performance['btl5'] = bt_long5
     # top 10 average
-    # performance['btl10'] = bt_long10
+    performance['btl10'] = bt_long10
     return performance
+
+
+
