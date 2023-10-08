@@ -4,7 +4,7 @@ import os
 import torch as torch
 from load_data import load_relation_data, load_EOD_data
 from evaluator import evaluate
-from model import get_loss, RelationLSTM, cal_my_IC, StockLSTM, cal_sample_loss, contrastive_three_modes_loss
+from model import get_loss, RelationLSTM, cal_my_IC, StockLSTM, cal_sample_loss, contrastive_three_modes_loss, self_contrastive_loss
 from utils import string_format, Logger
 from tsne import plot_embedding, plot_embedding_heatmap, cal_distance
 import matplotlib.pyplot as plt
@@ -113,7 +113,7 @@ def get_batch(offset=None):
         np.expand_dims(price_data[:, offset + seq_len - 1], axis=1),
         np.expand_dims(gt_data[:, offset + seq_len + steps - 1], axis=1))
 
-def train(long_tail_masks={"train":[],"valid":[],"test":[]}, long_tail_scores={"train":[]}):
+def train(long_tail_masks={"train":[],"valid":[],"test":[]}, long_tail_scores={"train":[]}, easy_hard_contrast=False, augmentation=False):
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3) # lr 从1e-3改到1e-4
     best_valid_loss = np.inf
     best_valid_perf = None
@@ -138,18 +138,21 @@ def train(long_tail_masks={"train":[],"valid":[],"test":[]}, long_tail_scores={"
             pred_repre = model.get_repre(data_batch) # [1026, 133]
             prediction = model.predict(pred_repre) # 
             # l4 loss or reweighting
-            weight_mask = torch.Tensor(long_tail_masks["train"][-3][:, batch_offsets[j]].squeeze()).to(device) # 放大20%的样本的loss
+            weight_mask = torch.Tensor(long_tail_masks["train"][-1][:, batch_offsets[j]].squeeze()).to(device) # 放大20%的样本的loss
             # cur_loss, cur_reg_loss, cur_rank_loss, _ = get_loss(prediction, gt_batch, price_batch, mask_batch,
                                                                 # batch_size, parameters['alpha'], l4=False, weight_mask=weight_mask) 
             cur_loss, cur_reg_loss, cur_rank_loss, _ = get_loss(prediction, gt_batch, price_batch, mask_batch,
                                                                 batch_size, parameters['alpha'], l4=False, weight_mask=[]) 
-            # 先尝试在一个batch内部进行拉近和拉远
             scores = torch.Tensor(long_tail_scores['train'][:, batch_offsets[j]].squeeze()).to(device)
-            # if epoch>10:
-            #     contrastive_loss, pos_num, neg_num = contrastive_three_modes_loss(features=pred_repre, scores=scores, weight_mask=weight_mask, temp=0.1, base_temperature=0.07)
-            #     # print(pos_num, neg_num)
-            #     # update model
-            #     cur_loss += contrastive_loss/1000  #根据测试 /1000效果不如/100
+            if easy_hard_contrast:
+                if epoch>10:
+                    contrastive_loss, pos_num, neg_num = contrastive_three_modes_loss(features=pred_repre, scores=scores, weight_mask=weight_mask, temp=10, base_temperature=0.07)
+                    cur_loss += contrastive_loss/1000
+            if augmentation:
+                noise = torch.randn_like(data_batch, device=device)/1000
+                pred_repre_aug = model.get_repre(data_batch+noise)
+                self_con_loss = self_contrastive_loss(pred_repre, pred_repre_aug, temp=1)
+                cur_loss = cur_loss + self_con_loss/10000
             cur_loss.backward()
             optimizer.step()
 
@@ -183,12 +186,13 @@ def train(long_tail_masks={"train":[],"valid":[],"test":[]}, long_tail_scores={"
             best_valid_perf = val_perf
             best_test_perf = test_perf
             logging.info(f'Better valid loss:{string_format(best_valid_loss)}')
-            torch.save(model.state_dict(), f"{log_folder_path}/{epoch}.pt")
+            if epoch>9:
+                torch.save(model.state_dict(), f"{log_folder_path}/{epoch}.pt")
     logging.info(f'\nBest Valid performance:{string_format(best_valid_perf)}')
     logging.info(f'Best Test performance:{string_format(best_test_perf)}')
 
 
-def draw_tsne(long_tail_masks={"train":[],"valid":[],"test":[]}, long_tail_scores={"train":[]}):
+def draw_tsne(long_tail_masks={"train":[],"valid":[],"test":[]}, long_tail_scores={"train":[]}, plot=True):
     batch_offsets = np.arange(start=0, stop=valid_index- parameters['seq'] - steps + 1, dtype=int)
     with torch.no_grad():
         for j in range(valid_index - parameters['seq'] - steps + 1):
@@ -198,15 +202,16 @@ def draw_tsne(long_tail_masks={"train":[],"valid":[],"test":[]}, long_tail_score
             )
             pred_repre = model.get_repre(data_batch) # [1026, 133]
             weight_mask = long_tail_masks["train"][-3][:, batch_offsets[j]].squeeze() # 放大5%的样本的loss
-            fig = plot_embedding(data=pred_repre.cpu().numpy(), label=weight_mask, title='try')
-            plt.savefig(f"{log_folder_path}/top5_{j}.png")
-            plt.close()
-            fig = plot_embedding_heatmap(data=pred_repre.cpu().numpy(), label=gt_batch.cpu().numpy().squeeze(),mask=weight_mask, title='pred_label')
-            plt.savefig(f'{log_folder_path}/pred_label_{j}.png')
-            plt.close()
+            if plot:
+                fig = plot_embedding(data=pred_repre.cpu().numpy(), label=weight_mask, title='try')
+                plt.savefig(f"{log_folder_path}/top5_{j}.png")
+                plt.close()
+                fig = plot_embedding_heatmap(data=pred_repre.cpu().numpy(), label=gt_batch.cpu().numpy().squeeze(),mask=weight_mask, title='pred_label')
+                plt.savefig(f'{log_folder_path}/pred_label_{j}.png')
+                plt.close()
             hard_avg, easy_avg, all_avg = cal_distance(pred_repre.cpu().numpy(), weight_mask)
             logging.info('day:{} hard_avg:{} easy_avg:{} all_avg:{}'.format(j, string_format(hard_avg), string_format(easy_avg), string_format(all_avg)))
-            if j>20:
+            if j>=10:
                 exit(-1)
     
 
@@ -264,7 +269,9 @@ if __name__=="__main__":
                            "valid":[valid_mask1, valid_mask5, valid_mask10, valid_mask20],
                            "test":[test_mask1, test_mask5, test_mask10, test_mask20],}
     
-    # train(long_tail_masks=long_tail_masks,long_tail_scores={"train":train_scores})
-    model.load_state_dict(torch.load(f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/logs/BaseModels/RelationLSTM/44.pt"))
-    draw_tsne(long_tail_masks=long_tail_masks, long_tail_scores={"train":train_scores})
+    # model.load_state_dict(torch.load(f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/logs/BaseModels/RelationLSTM/44.pt"))
+    train(long_tail_masks=long_tail_masks, long_tail_scores={"train":train_scores}, easy_hard_contrast=False, augmentation=False)
+    # model.load_state_dict(torch.load(f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/logs/BaseModels/RelationLSTM/44.pt"))
+    # model.load_state_dict(torch.load('/home/zzx/quant/TOIS19_pytorch/TGC_torch/logs/2023-09-28/16:24:27_/37.pt'))
+    # draw_tsne(long_tail_masks=long_tail_masks, long_tail_scores={"train":train_scores},plot=False)
 

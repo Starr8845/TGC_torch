@@ -166,8 +166,32 @@ def contrastive_three_modes_loss(features, scores, weight_mask=None, temp=0.1, b
     log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True) + 1e-20)
     mean_log_prob_pos = (mask_positives * log_prob).sum(1) / (mask_positives.sum(1) + 1e-20)
 
-    loss = - (temp / base_temperature) * mean_log_prob_pos
+    # loss = - (temp / base_temperature) * mean_log_prob_pos
+    loss = -1 * mean_log_prob_pos
     loss = loss.view(1, batch_size).mean()
     return loss, mask_positives.sum(1).mean(), mask_negatives.sum(1).mean()
+
+
+# 尝试一个直接对比学习任务   在x上加噪   给出一个info NCE loss
+
+def self_contrastive_loss(features, features_augmented, temp):
+    # anchor_dot_contrast = torch.div(torch.matmul(features, features_augmented.T), temp)
+    anchor_dot_contrast = pair_wise_cos(features, features_augmented) / temp
+    # 这里需要做normlization
+    # print(anchor_dot_contrast.shape)
+    # print(anchor_dot_contrast)
+    criterion = nn.CrossEntropyLoss()
+    targets = torch.arange(features.size(0)).to(features.device)
+    loss = criterion(anchor_dot_contrast, targets)
+    return loss
+
+
+def pair_wise_cos(a,b):
+    a_norm = a/a.norm(dim=1)[:, None]
+    b_norm = b/b.norm(dim=1)[:, None]
+    res = torch.mm(a_norm, b_norm.transpose(0,1))
+    return res
+
+
 
 
