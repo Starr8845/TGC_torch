@@ -4,10 +4,13 @@ import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 
-def get_loss(prediction, ground_truth, base_price, mask, batch_size, alpha, l4=False, weight_mask=[]):
+def get_loss(prediction, ground_truth, base_price, mask, batch_size, alpha, l4=False, weight_mask=[], direct_return_ratio=True):
     device = prediction.device
     all_one = torch.ones(batch_size, 1, dtype=torch.float32).to(device)
-    return_ratio = torch.div(torch.sub(prediction, base_price), base_price)
+    if direct_return_ratio:
+        return_ratio=prediction  # 让模型直接预测return ratio
+    else:
+        return_ratio = torch.div(torch.sub(prediction, base_price), base_price)
     # return ratio's mse loss
     if len(weight_mask)==0:
         reg_loss = F.mse_loss(return_ratio * mask, ground_truth * mask)
@@ -118,7 +121,7 @@ class RelationLSTM(nn.Module):
     def __init__(self, batch_size, rel_encoding, rel_mask, inner_prod=False, dropout=0.0):
         super().__init__()
         self.batch_size = batch_size
-        self.lstm = nn.LSTM(5, 64, batch_first=True, dropout=dropout,num_layers=2) # num_layers=2
+        self.lstm = nn.LSTM(5, 64, batch_first=True, dropout=dropout,num_layers=1) # num_layers=2
         self.graph_layer = GraphModule(batch_size, 64, rel_encoding, rel_mask, inner_prod, dropout=dropout)
         self.fc = nn.Linear(64 * 2 + 5, 1)
         self.fc_residual = nn.Linear(5, 5)
@@ -135,7 +138,8 @@ class RelationLSTM(nn.Module):
         return outputs_cat
     
     def predict(self, outputs_cat):
-        prediction = F.leaky_relu(self.fc(outputs_cat))
+        # prediction = F.leaky_relu(self.fc(outputs_cat))
+        prediction = self.fc(outputs_cat)
         return prediction
 
     def forward(self, inputs):

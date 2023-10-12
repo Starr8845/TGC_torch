@@ -31,7 +31,7 @@ def validate(start_index, end_index, long_tail_masks=[]):
             )
             prediction = model(data_batch)
             cur_loss, cur_reg_loss, cur_rank_loss, cur_rr = get_loss(prediction, gt_batch, price_batch, mask_batch,
-                                                                     batch_size, parameters['alpha'])
+                                                                     batch_size, parameters['alpha'], direct_return_ratio=direct_return_ratio)
             IC, RIC = cal_my_IC(cur_rr * mask_batch, gt_batch * mask_batch)
             my_ICs.append(IC)
             my_RICs.append(RIC)
@@ -71,7 +71,7 @@ def get_difficulty_mask(base_model, start_index, end_index):
             )
             prediction = base_model(data_batch)
             cur_loss, cur_reg_loss, cur_rank_loss, cur_rr = get_loss(prediction, gt_batch, price_batch, mask_batch,
-                                                                     batch_size, parameters['alpha'])
+                                                                     batch_size, parameters['alpha'], direct_return_ratio=direct_return_ratio)
             cur_valid_pred[:, cur_offset - (start_index - parameters['seq'] - steps + 1)] = cur_rr[:, 0].cpu()
             cur_valid_gt[:, cur_offset - (start_index - parameters['seq'] - steps + 1)] = gt_batch[:, 0].cpu()
             cur_valid_mask[:, cur_offset - (start_index - parameters['seq'] - steps + 1)] = mask_batch[:, 0].cpu()
@@ -145,7 +145,7 @@ def train(long_tail_masks={"train":[],"valid":[],"test":[]}, long_tail_scores={"
             # cur_loss, cur_reg_loss, cur_rank_loss, _ = get_loss(prediction, gt_batch, price_batch, mask_batch,
                                                                 # batch_size, parameters['alpha'], l4=False, weight_mask=weight_mask) 
             cur_loss, cur_reg_loss, cur_rank_loss, _ = get_loss(prediction, gt_batch, price_batch, mask_batch,
-                                                                batch_size, parameters['alpha'], l4=False, weight_mask=[]) 
+                                                                batch_size, parameters['alpha'], l4=False, weight_mask=[], direct_return_ratio=direct_return_ratio) 
             scores = torch.Tensor(long_tail_scores['train'][:, batch_offsets[j]].squeeze()).to(device)
             additional_loss = 0
             if easy_hard_contrast:
@@ -224,12 +224,15 @@ def draw_tsne(long_tail_masks={"train":[],"valid":[],"test":[]}, long_tail_score
                 get_batch(batch_offsets[j])
             )
             pred_repre = model.get_repre(data_batch) # [1026, 133]
+            prediction = model.predict(pred_repre)
             weight_mask = long_tail_masks["train"][-1][:, batch_offsets[j]].squeeze()
             if save_name:
                 # 保存一下 representations 以及对应的label  
                 torch.save(pred_repre.cpu(), f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/temp/repres/repres_{save_name}_{j}.pt")
                 torch.save(gt_batch.cpu(), f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/temp/repres/gt_{save_name}_{j}.pt")
+                torch.save(prediction.cpu(), f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/temp/repres/prediction_{save_name}_{j}.pt")
                 np.save(f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/temp/repres/weight_mask_{save_name}_{j}.npy", weight_mask)
+            if j > 10:
                 exit(-1)
             if plot:
                 fig = plot_embedding(data=pred_repre.cpu().numpy(), label=weight_mask, title='try')
@@ -276,12 +279,13 @@ if __name__=="__main__":
     )
     logging.info(f'relation encoding shape:{rel_encoding.shape}')
     logging.info(f'relation mask shape:{rel_mask.shape}')
-
+    
+    direct_return_ratio=True
     model = RelationLSTM(
         batch_size=batch_size,
         rel_encoding=rel_encoding,
         rel_mask=rel_mask,
-        dropout=0.3   # 0.3
+        dropout=0   # 0.3
     ).to(device)
     # model = StockLSTM(
     #     batch_size=batch_size
@@ -306,8 +310,11 @@ if __name__=="__main__":
     # model.load_state_dict(torch.load(f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/logs/2023-10-10/16:55:55_/37.pt")) # unitrepre37
     # model.load_state_dict(torch.load(f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/logs/2023-10-11/17:14:34_/44.pt")) # alignment44
 
-    train(long_tail_masks=long_tail_masks, long_tail_scores={"train":train_scores}, easy_hard_contrast=False, augmentation_Gaussian=False, augmentation_dropout=True, uniformity=False)
+    # model.load_state_dict(torch.load(f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/logs/2023-10-12/11:32:05_/43.pt")) # withoutbaseprice43 with leakyrelu
+    # model.load_state_dict(torch.load(f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/logs/2023-10-12/14:58:00_/38.pt")) # withoutbasepricenorelu38
+    
+    train(long_tail_masks=long_tail_masks, long_tail_scores={"train":train_scores}, easy_hard_contrast=False, augmentation_Gaussian=False, augmentation_dropout=False, uniformity=False)
     # model.load_state_dict(torch.load(f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/logs/BaseModels/RelationLSTM/44.pt"))
     # model.load_state_dict(torch.load('/home/zzx/quant/TOIS19_pytorch/TGC_torch/logs/2023-09-28/16:24:27_/37.pt'))
-    # draw_tsne(long_tail_masks=long_tail_masks, long_tail_scores={"train":train_scores},plot=False, save_name="alignment44")
+    # draw_tsne(long_tail_masks=long_tail_masks, long_tail_scores={"train":train_scores},plot=False, save_name="withoutbasepricenorelu38")
 
