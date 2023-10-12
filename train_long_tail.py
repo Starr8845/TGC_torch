@@ -4,7 +4,7 @@ import os
 import torch as torch
 from load_data import load_relation_data, load_EOD_data
 from evaluator import evaluate
-from model import get_loss, RelationLSTM, cal_my_IC, StockLSTM, cal_sample_loss, contrastive_three_modes_loss, self_contrastive_loss
+from model import get_loss, RelationLSTM, cal_my_IC, StockLSTM, cal_sample_loss, contrastive_three_modes_loss, self_contrastive_loss, uniform_loss, align_loss
 from utils import string_format, Logger
 from tsne import plot_embedding, plot_embedding_heatmap, cal_distance
 import matplotlib.pyplot as plt
@@ -16,6 +16,7 @@ def validate(start_index, end_index, long_tail_masks=[]):
     """
     my_ICs = []
     my_RICs = []
+    model.eval()
     with torch.no_grad():
         cur_valid_pred = np.zeros([len(tickers), end_index - start_index], dtype=float)
         cur_valid_gt = np.zeros([len(tickers), end_index - start_index], dtype=float)
@@ -113,7 +114,7 @@ def get_batch(offset=None):
         np.expand_dims(price_data[:, offset + seq_len - 1], axis=1),
         np.expand_dims(gt_data[:, offset + seq_len + steps - 1], axis=1))
 
-def train(long_tail_masks={"train":[],"valid":[],"test":[]}, long_tail_scores={"train":[]}, easy_hard_contrast=False, augmentation=False):
+def train(long_tail_masks={"train":[],"valid":[],"test":[]}, long_tail_scores={"train":[]}, easy_hard_contrast=False, augmentation_Gaussian=False, augmentation_dropout=False, uniformity=False, alignment_loss=False):
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3) # lr 从1e-3改到1e-4
     best_valid_loss = np.inf
     best_valid_perf = None
@@ -123,9 +124,11 @@ def train(long_tail_masks={"train":[],"valid":[],"test":[]}, long_tail_scores={"
     print(batch_offsets.shape)
     # train loop
     for epoch in range(epochs):
+        model.train()
         logging.info(f"EPOCH {epoch}")
         np.random.shuffle(batch_offsets)
         tra_loss = 0.0
+        tra_additional_loss = 0.0
         tra_reg_loss = 0.0
         tra_rank_loss = 0.0
         # steps
@@ -144,28 +147,47 @@ def train(long_tail_masks={"train":[],"valid":[],"test":[]}, long_tail_scores={"
             cur_loss, cur_reg_loss, cur_rank_loss, _ = get_loss(prediction, gt_batch, price_batch, mask_batch,
                                                                 batch_size, parameters['alpha'], l4=False, weight_mask=[]) 
             scores = torch.Tensor(long_tail_scores['train'][:, batch_offsets[j]].squeeze()).to(device)
+            additional_loss = 0
             if easy_hard_contrast:
                 if epoch>10:
                     contrastive_loss, pos_num, neg_num = contrastive_three_modes_loss(features=pred_repre, scores=scores, weight_mask=weight_mask, temp=10, base_temperature=0.07)
                     cur_loss += contrastive_loss/1000
-            if augmentation:
+                    additional_loss += contrastive_loss.item()/1000
+            if augmentation_Gaussian:
                 noise = torch.randn_like(data_batch, device=device)/1000
                 pred_repre_aug = model.get_repre(data_batch+noise)
                 self_con_loss = self_contrastive_loss(pred_repre, pred_repre_aug, temp=1)
                 cur_loss = cur_loss + self_con_loss/10000
+                additional_loss += self_con_loss.item()/10000
+            if augmentation_dropout:
+                pred_repre2 = model.get_repre(data_batch)
+                if alignment_loss:
+                    self_con_loss = align_loss(pred_repre, pred_repre2, alpha=2)
+                    cur_loss = cur_loss + self_con_loss/50
+                    additional_loss += self_con_loss.item()/50
+                else:
+                    self_con_loss = self_contrastive_loss(pred_repre, pred_repre2, temp=1)
+                    cur_loss = cur_loss + self_con_loss/10000   
+                    additional_loss += self_con_loss.item()/10000
+            if uniformity:
+                uniformity_loss = uniform_loss(pred_repre, t=2)
+                # print(uniformity_loss) # -0.5左右
+                cur_loss += uniformity_loss/10000
+                additional_loss += uniformity_loss.item()/10000
             cur_loss.backward()
             optimizer.step()
 
             tra_loss += cur_loss.item()
+            tra_additional_loss += additional_loss
             tra_reg_loss += cur_reg_loss.item()
             tra_rank_loss += cur_rank_loss.item()
-
         # train loss
         # loss = reg_loss(mse) + alpha*rank_loss
         tra_loss = tra_loss / (valid_index - parameters['seq'] - steps + 1)
         tra_reg_loss = tra_reg_loss / (valid_index - parameters['seq'] - steps + 1)
         tra_rank_loss = tra_rank_loss / (valid_index - parameters['seq'] - steps + 1)
-        logging.info('Train : loss:{} reg_loss:{} rank_loss:{}'.format(string_format(tra_loss), string_format(tra_reg_loss), string_format(tra_rank_loss)))
+        tra_additional_loss = tra_additional_loss / (valid_index - parameters['seq'] - steps + 1)
+        logging.info('Train : loss:{} reg_loss:{} rank_loss:{} additional_loss:{}'.format(string_format(tra_loss), string_format(tra_reg_loss), string_format(tra_rank_loss), string_format(tra_additional_loss)))
 
         tra_loss, tra_reg_loss, tra_rank_loss, tra_perf = validate(parameters['seq'], valid_index, long_tail_masks["train"])
         logging.info('train : loss:{} reg_loss:{} rank_loss:{}'.format(string_format(tra_loss), string_format(tra_reg_loss), string_format(tra_rank_loss)))
@@ -192,8 +214,9 @@ def train(long_tail_masks={"train":[],"valid":[],"test":[]}, long_tail_scores={"
     logging.info(f'Best Test performance:{string_format(best_test_perf)}')
 
 
-def draw_tsne(long_tail_masks={"train":[],"valid":[],"test":[]}, long_tail_scores={"train":[]}, plot=True):
+def draw_tsne(long_tail_masks={"train":[],"valid":[],"test":[]}, long_tail_scores={"train":[]}, plot=True, save_name=False):
     batch_offsets = np.arange(start=0, stop=valid_index- parameters['seq'] - steps + 1, dtype=int)
+    model.eval()
     with torch.no_grad():
         for j in range(valid_index - parameters['seq'] - steps + 1):
             data_batch, mask_batch, price_batch, gt_batch = map(
@@ -201,7 +224,13 @@ def draw_tsne(long_tail_masks={"train":[],"valid":[],"test":[]}, long_tail_score
                 get_batch(batch_offsets[j])
             )
             pred_repre = model.get_repre(data_batch) # [1026, 133]
-            weight_mask = long_tail_masks["train"][-3][:, batch_offsets[j]].squeeze() # 放大5%的样本的loss
+            weight_mask = long_tail_masks["train"][-1][:, batch_offsets[j]].squeeze()
+            if save_name:
+                # 保存一下 representations 以及对应的label  
+                torch.save(pred_repre.cpu(), f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/temp/repres/repres_{save_name}_{j}.pt")
+                torch.save(gt_batch.cpu(), f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/temp/repres/gt_{save_name}_{j}.pt")
+                np.save(f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/temp/repres/weight_mask_{save_name}_{j}.npy", weight_mask)
+                exit(-1)
             if plot:
                 fig = plot_embedding(data=pred_repre.cpu().numpy(), label=weight_mask, title='try')
                 plt.savefig(f"{log_folder_path}/top5_{j}.png")
@@ -251,7 +280,8 @@ if __name__=="__main__":
     model = RelationLSTM(
         batch_size=batch_size,
         rel_encoding=rel_encoding,
-        rel_mask=rel_mask
+        rel_mask=rel_mask,
+        dropout=0.3   # 0.3
     ).to(device)
     # model = StockLSTM(
     #     batch_size=batch_size
@@ -270,8 +300,14 @@ if __name__=="__main__":
                            "test":[test_mask1, test_mask5, test_mask10, test_mask20],}
     
     # model.load_state_dict(torch.load(f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/logs/BaseModels/RelationLSTM/44.pt"))
-    train(long_tail_masks=long_tail_masks, long_tail_scores={"train":train_scores}, easy_hard_contrast=False, augmentation=False)
+    # model.load_state_dict(torch.load(f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/logs/2023-10-09/15:57:28_/4.pt")) # after uniformity loss
+    # model.load_state_dict(torch.load(f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/logs/2023-10-09/16:27:52_/19.pt")) # with uniformity loss 
+    # model.load_state_dict(torch.load(f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/logs/2023-10-09/20:14:47_/23.pt")) # with dropout model augmentations
+    # model.load_state_dict(torch.load(f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/logs/2023-10-10/16:55:55_/37.pt")) # unitrepre37
+    # model.load_state_dict(torch.load(f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/logs/2023-10-11/17:14:34_/44.pt")) # alignment44
+
+    train(long_tail_masks=long_tail_masks, long_tail_scores={"train":train_scores}, easy_hard_contrast=False, augmentation_Gaussian=False, augmentation_dropout=True, uniformity=False)
     # model.load_state_dict(torch.load(f"/home/zzx/quant/TOIS19_pytorch/TGC_torch/logs/BaseModels/RelationLSTM/44.pt"))
     # model.load_state_dict(torch.load('/home/zzx/quant/TOIS19_pytorch/TGC_torch/logs/2023-09-28/16:24:27_/37.pt'))
-    # draw_tsne(long_tail_masks=long_tail_masks, long_tail_scores={"train":train_scores},plot=False)
+    # draw_tsne(long_tail_masks=long_tail_masks, long_tail_scores={"train":train_scores},plot=False, save_name="alignment44")
 

@@ -70,7 +70,7 @@ def cal_my_IC(prediction, label):
 
 
 class GraphModule(nn.Module):
-    def __init__(self, batch_size, fea_shape, rel_encoding, rel_mask, inner_prod=False):
+    def __init__(self, batch_size, fea_shape, rel_encoding, rel_mask, inner_prod=False, dropout=0):
         super().__init__()
         self.batch_size = batch_size
         self.input_shape = fea_shape
@@ -82,6 +82,7 @@ class GraphModule(nn.Module):
         if self.inner_prod is False:
             self.head_weight = nn.Linear(fea_shape, 1)
             self.tail_weight = nn.Linear(fea_shape, 1)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, inputs):
         rel_weight = self.rel_weight(self.relation)
@@ -94,6 +95,7 @@ class GraphModule(nn.Module):
             tail_weight = self.tail_weight(inputs)
             weight = (head_weight @ all_one.t() + all_one @ tail_weight.t()) + rel_weight[:, :, -1]
         weight_masked = F.softmax(self.rel_mask + weight, dim=0)
+        weight_masked = self.dropout(weight_masked)
         outputs = weight_masked @ inputs
         return outputs
 
@@ -113,11 +115,11 @@ class StockLSTM(nn.Module):
 
 
 class RelationLSTM(nn.Module):
-    def __init__(self, batch_size, rel_encoding, rel_mask, inner_prod=False):
+    def __init__(self, batch_size, rel_encoding, rel_mask, inner_prod=False, dropout=0.0):
         super().__init__()
         self.batch_size = batch_size
-        self.lstm = nn.LSTM(5, 64, batch_first=True)
-        self.graph_layer = GraphModule(batch_size, 64, rel_encoding, rel_mask, inner_prod)
+        self.lstm = nn.LSTM(5, 64, batch_first=True, dropout=dropout,num_layers=2) # num_layers=2
+        self.graph_layer = GraphModule(batch_size, 64, rel_encoding, rel_mask, inner_prod, dropout=dropout)
         self.fc = nn.Linear(64 * 2 + 5, 1)
         self.fc_residual = nn.Linear(5, 5)
 
@@ -129,6 +131,7 @@ class RelationLSTM(nn.Module):
         # outputs_cat = torch.cat([x, outputs_graph], dim=1)
         residual = self.fc_residual(inputs[:,-1,:].squeeze())
         outputs_cat = torch.cat([residual, x, outputs_graph], dim=1)
+        # outputs_cat = outputs_cat/outputs_cat.norm(dim=1)[:, None]  # 把表征约束到单位球面上
         return outputs_cat
     
     def predict(self, outputs_cat):
@@ -193,5 +196,9 @@ def pair_wise_cos(a,b):
     return res
 
 
+def uniform_loss(x, t=2):
+    return torch.pdist(x, p=2).pow(2).mul(-t).exp().mean().log()
 
 
+def align_loss(x, y, alpha=2):
+    return (x - y).norm(p=2, dim=1).pow(alpha).mean()

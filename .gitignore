@@ -1,3 +1,7 @@
 .idea
 data
 *.json
+figs
+__pycache__
+logs
+temp*
